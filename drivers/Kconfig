@@ -223,6 +223,8 @@ source "drivers/siox/Kconfig"
 
 source "drivers/slimbus/Kconfig"
 
+source "drivers/interconnect/Kconfig"
+
 source "drivers/esoc/Kconfig"
 
 source "drivers/sensors/Kconfig"
