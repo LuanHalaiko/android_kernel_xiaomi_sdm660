@@ -6,5 +6,11 @@ config INTERCONNECT_QCOM
 	help
 	  Support for Qualcomm's Network-on-Chip interconnect hardware.
 
+config INTERCONNECT_QCOM_BCM_VOTER
+	tristate
+
 config INTERCONNECT_QCOM_SMD_RPM
+	tristate
+
+config INTERCONNECT_QCOM_RPMH
 	tristate
