@@ -14,15 +14,14 @@
 #include <linux/io.h>
 #include <linux/err.h>
 #include <linux/types.h>
-#include <soc/qcom/socinfo.h>
-#include <linux/msm-bus.h>
+#include <linux/of.h>
 #include <linux/qrng.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/crypto.h>
 #include <crypto/internal/rng.h>
-
+#include <linux/interconnect.h>
 #include <linux/sched/signal.h>
 
 #define DRIVER_NAME "msm_rng"
@@ -49,13 +48,13 @@ struct msm_rng_device {
 	struct platform_device *pdev;
 	void __iomem *base;
 	struct clk *prng_clk;
-	uint32_t qrng_perf_client;
 	struct mutex rng_lock;
+	struct icc_path *icc_path;
 };
 
-struct msm_rng_device msm_rng_device_info;
+static struct msm_rng_device msm_rng_device_info;
 static struct msm_rng_device *msm_rng_dev_cached;
-struct mutex cached_rng_lock;
+static struct mutex cached_rng_lock;
 static long msm_rng_ioctl(struct file *filp, unsigned int cmd,
 				unsigned long arg)
 {
@@ -64,8 +63,7 @@ static long msm_rng_ioctl(struct file *filp, unsigned int cmd,
 	switch (cmd) {
 	case QRNG_IOCTL_RESET_BUS_BANDWIDTH:
 		pr_debug("calling msm_rng_bus_scale(LOW)\n");
-		ret = msm_bus_scale_client_update_request(
-				msm_rng_device_info.qrng_perf_client, 0);
+		ret = icc_set_bw(msm_rng_device_info.icc_path, 0, 0);
 		if (ret)
 			pr_err("failed qrng_reset_bus_bw, ret = %ld\n", ret);
 		break;
@@ -102,9 +100,8 @@ static int msm_rng_direct_read(struct msm_rng_device *msm_rng_dev,
 
 	mutex_lock(&msm_rng_dev->rng_lock);
 
-	if (msm_rng_dev->qrng_perf_client) {
-		ret = msm_bus_scale_client_update_request(
-				msm_rng_dev->qrng_perf_client, 1);
+	if (msm_rng_dev->icc_path) {
+		ret = icc_set_bw(msm_rng_dev->icc_path, 0, 800);
 		if (ret) {
 			pr_err("bus_scale_client_update_req failed\n");
 			goto bus_err;
@@ -148,9 +145,8 @@ static int msm_rng_direct_read(struct msm_rng_device *msm_rng_dev,
 	if (msm_rng_dev->prng_clk)
 		clk_disable_unprepare(msm_rng_dev->prng_clk);
 err:
-	if (msm_rng_dev->qrng_perf_client) {
-		ret = msm_bus_scale_client_update_request(
-				msm_rng_dev->qrng_perf_client, 0);
+	if (msm_rng_dev->icc_path) {
+		ret = icc_set_bw(msm_rng_dev->icc_path, 0, 0);
 		if (ret)
 			pr_err("bus_scale_client_update_req failed\n");
 	}
@@ -184,9 +180,8 @@ static int msm_rng_enable_hw(struct msm_rng_device *msm_rng_dev)
 	unsigned long reg_val = 0;
 	int ret = 0;
 
-	if (msm_rng_dev->qrng_perf_client) {
-		ret = msm_bus_scale_client_update_request(
-				msm_rng_dev->qrng_perf_client, 1);
+	if (msm_rng_dev->icc_path) {
+		ret = icc_set_bw(msm_rng_dev->icc_path, 0, 80);
 		if (ret)
 			pr_err("bus_scale_client_update_req failed\n");
 	}
@@ -226,9 +221,8 @@ static int msm_rng_enable_hw(struct msm_rng_device *msm_rng_dev)
 	if (msm_rng_dev->prng_clk)
 		clk_disable_unprepare(msm_rng_dev->prng_clk);
 
-	if (msm_rng_dev->qrng_perf_client) {
-		ret = msm_bus_scale_client_update_request(
-				msm_rng_dev->qrng_perf_client, 0);
+	if (msm_rng_dev->icc_path) {
+		ret = icc_set_bw(msm_rng_dev->icc_path, 0, 0);
 		if (ret)
 			pr_err("bus_scale_client_update_req failed\n");
 	}
@@ -249,10 +243,7 @@ static int msm_rng_probe(struct platform_device *pdev)
 	void __iomem *base = NULL;
 	bool configure_qrng = true;
 	int error = 0;
-	int ret = 0;
 	struct device *dev;
-
-	struct msm_bus_scale_pdata *qrng_platform_support = NULL;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res == NULL) {
@@ -278,27 +269,16 @@ static int msm_rng_probe(struct platform_device *pdev)
 	/* create a handle for clock control */
 	if (pdev->dev.of_node) {
 		if (of_property_read_bool(pdev->dev.of_node,
-					"qcom,no-clock-support")) {
+					"qcom,no-clock-support"))
 			msm_rng_dev->prng_clk = NULL;
-		} else {
-			if (of_property_read_bool(pdev->dev.of_node,
-					"qcom,msm-rng-iface-clk")) {
-				msm_rng_dev->prng_clk = clk_get(&pdev->dev,
-							"iface_clk");
-			} else if (of_property_read_bool(pdev->dev.of_node,
-					"qcom,msm-rng-hwkm-clk")) {
-				msm_rng_dev->prng_clk = clk_get(&pdev->dev,
-							 "km_clk_src");
-			} else {
-				msm_rng_dev->prng_clk = clk_get(&pdev->dev,
-							 "core_clk");
-			}
-		}
+		else
+			msm_rng_dev->prng_clk = clk_get(&pdev->dev,
+							"km_clk_src");
 	}
 
 	if (IS_ERR(msm_rng_dev->prng_clk)) {
 		dev_err(&pdev->dev, "failed to register clock source\n");
-		error = -EPERM;
+		error = -ENODEV;
 		goto err_clk_get;
 	}
 
@@ -307,14 +287,13 @@ static int msm_rng_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, msm_rng_dev);
 
 	if (pdev->dev.of_node) {
-		/* Register bus client */
-		qrng_platform_support = msm_bus_cl_get_pdata(pdev);
-		msm_rng_dev->qrng_perf_client = msm_bus_scale_register_client(
-						qrng_platform_support);
-		msm_rng_device_info.qrng_perf_client =
-					msm_rng_dev->qrng_perf_client;
-		if (!msm_rng_dev->qrng_perf_client)
-			pr_err("Unable to register bus client\n");
+		msm_rng_dev->icc_path = of_icc_get(&pdev->dev, "data_path");
+		msm_rng_device_info.icc_path = msm_rng_dev->icc_path;
+		if (IS_ERR(msm_rng_dev->icc_path)) {
+			error = dev_err_probe(&pdev->dev, PTR_ERR(msm_rng_dev->icc_path),
+				"get icc path err\n");
+			goto err_icc_get;
+		}
 	}
 
 	/* Enable rng h/w for the targets which can access the entire
@@ -326,7 +305,7 @@ static int msm_rng_probe(struct platform_device *pdev)
 	if (configure_qrng) {
 		error = msm_rng_enable_hw(msm_rng_dev);
 		if (error)
-			goto rollback_clk;
+			goto err_icc_get;
 	}
 
 	mutex_init(&msm_rng_dev->rng_lock);
@@ -337,15 +316,19 @@ static int msm_rng_probe(struct platform_device *pdev)
 	error = hwrng_register(&msm_rng);
 	if (error) {
 		dev_err(&pdev->dev, "failed to register hwrng\n");
-		error = -EPERM;
-		goto rollback_clk;
+		goto err_reg_hwrng;
 	}
-	ret = register_chrdev(QRNG_IOC_MAGIC, DRIVER_NAME, &msm_rng_fops);
+	error = register_chrdev(QRNG_IOC_MAGIC, DRIVER_NAME, &msm_rng_fops);
+	if (error) {
+		dev_err(&pdev->dev, "failed to register chrdev\n");
+		goto err_reg_chrdev;
+	}
 
 	msm_rng_class = class_create(THIS_MODULE, "msm-rng");
 	if (IS_ERR(msm_rng_class)) {
 		pr_err("class_create failed\n");
-		return PTR_ERR(msm_rng_class);
+		error = PTR_ERR(msm_rng_class);
+		goto err_create_cls;
 	}
 
 	dev = device_create(msm_rng_class, NULL, MKDEV(QRNG_IOC_MAGIC, 0),
@@ -353,15 +336,22 @@ static int msm_rng_probe(struct platform_device *pdev)
 	if (IS_ERR(dev)) {
 		pr_err("Device create failed\n");
 		error = PTR_ERR(dev);
-		goto unregister_chrdev;
+		goto err_create_dev;
 	}
 	cdev_init(&msm_rng_cdev, &msm_rng_fops);
 	msm_rng_dev_cached = msm_rng_dev;
 	return error;
 
-unregister_chrdev:
+err_create_dev:
+	class_destroy(msm_rng_class);
+err_create_cls:
 	unregister_chrdev(QRNG_IOC_MAGIC, DRIVER_NAME);
-rollback_clk:
+err_reg_chrdev:
+	hwrng_unregister(&msm_rng);
+err_reg_hwrng:
+	if (msm_rng_dev->icc_path)
+		icc_put(msm_rng_dev->icc_path);
+err_icc_get:
 	if (msm_rng_dev->prng_clk)
 		clk_put(msm_rng_dev->prng_clk);
 err_clk_get:
@@ -382,8 +372,8 @@ static int msm_rng_remove(struct platform_device *pdev)
 		clk_put(msm_rng_dev->prng_clk);
 	iounmap(msm_rng_dev->base);
 	platform_set_drvdata(pdev, NULL);
-	if (msm_rng_dev->qrng_perf_client)
-		msm_bus_scale_unregister_client(msm_rng_dev->qrng_perf_client);
+	if (msm_rng_dev->icc_path)
+		icc_put(msm_rng_dev->icc_path);
 
 	kzfree(msm_rng_dev);
 	msm_rng_dev_cached = NULL;
@@ -445,8 +435,7 @@ static struct rng_alg rng_algs[] = { {
 } };
 
 static const struct of_device_id qrng_match[] = {
-	{	.compatible = "qcom,msm-rng",
-	},
+	{.compatible = "qcom,msm-rng"},
 	{},
 };
 
