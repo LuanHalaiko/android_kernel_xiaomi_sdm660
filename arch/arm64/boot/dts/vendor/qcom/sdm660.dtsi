@@ -2,6 +2,7 @@
 #include <dt-bindings/clock/qcom,gcc-sdm660.h>
 #include <dt-bindings/clock/qcom,gpu-sdm660.h>
 #include <dt-bindings/clock/qcom,mmcc-sdm660.h>
+#include <dt-bindings/interconnect/qcom,sdm660.h>
 #include <dt-bindings/clock/qcom,rpmcc.h>
 #include <dt-bindings/clock/qcom,audio-ext-clk.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -2619,16 +2620,11 @@
 	qcom_rng: qrng@793000 {
 		compatible = "qcom,msm-rng";
 		reg = <0x793000 0x1000>;
-		qcom,msm-rng-iface-clk;
 		qcom,no-qrng-config;
-		qcom,msm-bus,name = "msm-rng-noc";
-		qcom,msm-bus,num-cases = <2>;
-		qcom,msm-bus,num-paths = <1>;
-		qcom,msm-bus,vectors-KBps =
-			<1 618 0 0>,    /* No vote */
-			<1 618 0 800>;  /* 100 KHz */
+		interconnect-names = "data_path";
+		interconnects = <&gnoc MASTER_APSS_PROC &cnoc SLAVE_PRNG>;
+		clock-names = "km_clk_src";
 		clocks = <&clock_gcc GCC_PRNG_AHB_CLK>;
-		clock-names = "iface_clk";
 	};
 
 	qcom,chd_silver {
