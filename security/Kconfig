@@ -191,6 +191,10 @@ config HARDENED_USERCOPY_PAGESPAN
 config FORTIFY_SOURCE
 	bool "Harden common str/mem functions against buffer overflows"
 	depends on ARCH_HAS_FORTIFY_SOURCE
+	# https://bugs.llvm.org/show_bug.cgi?id=50322
+	# https://bugs.llvm.org/show_bug.cgi?id=41459
+	# Bugs are fixed in clang 13 and above
+	depends on CLANG_VERSION > 130000
 	depends on GCC_VERSION < 120000
 	help
 	  Detect overflows of buffers in common string and memory functions
