@@ -28,8 +28,7 @@
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
 #include <linux/msm-sps.h>
-#include <linux/msm-bus.h>
-#include <linux/msm-bus-board.h>
+#include <linux/interconnect.h>
 #include <linux/i2c-msm-v2.h>
 
 #ifdef DEBUG
@@ -1561,94 +1560,25 @@ static void i2c_msm_clk_path_vote(struct i2c_msm_ctrl *ctrl)
 {
 	i2c_msm_clk_path_init(ctrl);
 
-	if (ctrl->rsrcs.clk_path_vote.client_hdl)
-		msm_bus_scale_client_update_request(
-					ctrl->rsrcs.clk_path_vote.client_hdl,
-					I2C_MSM_CLK_PATH_RESUME_VEC);
+	if (ctrl->rsrcs.icc_path)
+		icc_set_bw(ctrl->rsrcs.icc_path,
+		I2C_MSM_CLK_PATH_AVRG_BW(ctrl), I2C_MSM_CLK_PATH_BRST_BW(ctrl));
 }
 
 static void i2c_msm_clk_path_unvote(struct i2c_msm_ctrl *ctrl)
 {
-	if (ctrl->rsrcs.clk_path_vote.client_hdl)
-		msm_bus_scale_client_update_request(
-					ctrl->rsrcs.clk_path_vote.client_hdl,
-					I2C_MSM_CLK_PATH_SUSPEND_VEC);
+	if (ctrl->rsrcs.icc_path)
+		icc_set_bw(ctrl->rsrcs.icc_path, 0, 0);
 }
 
 static void i2c_msm_clk_path_teardown(struct i2c_msm_ctrl *ctrl)
 {
-	if (ctrl->rsrcs.clk_path_vote.client_hdl) {
-		msm_bus_scale_unregister_client(
-					ctrl->rsrcs.clk_path_vote.client_hdl);
-		ctrl->rsrcs.clk_path_vote.client_hdl = 0;
+	if (ctrl->rsrcs.icc_path) {
+		icc_put(ctrl->rsrcs.icc_path);
+		ctrl->rsrcs.icc_path = NULL;
 	}
 }
 
-/*
- * i2c_msm_clk_path_init_structs: internal impl detail of i2c_msm_clk_path_init
- *
- * allocates and initilizes the bus scaling vectors.
- */
-static int i2c_msm_clk_path_init_structs(struct i2c_msm_ctrl *ctrl)
-{
-	struct msm_bus_vectors *paths    = NULL;
-	struct msm_bus_paths   *usecases = NULL;
-
-	i2c_msm_dbg(ctrl, MSM_PROF, "initializes path clock voting structs\n");
-
-	paths = kzalloc(sizeof(*paths) * 2, GFP_KERNEL);
-	if (!paths)
-		return -ENOMEM;
-
-	usecases = kzalloc(sizeof(*usecases) * 2, GFP_KERNEL);
-	if (!usecases)
-		goto path_init_err;
-
-	ctrl->rsrcs.clk_path_vote.pdata = kzalloc(
-				       sizeof(*ctrl->rsrcs.clk_path_vote.pdata),
-				       GFP_KERNEL);
-	if (!ctrl->rsrcs.clk_path_vote.pdata)
-		goto path_init_err;
-
-	paths[I2C_MSM_CLK_PATH_SUSPEND_VEC] = (struct msm_bus_vectors) {
-		.src = ctrl->rsrcs.clk_path_vote.mstr_id,
-		.dst = MSM_BUS_SLAVE_EBI_CH0,
-		.ab  = 0,
-		.ib  = 0,
-	};
-
-	paths[I2C_MSM_CLK_PATH_RESUME_VEC]  = (struct msm_bus_vectors) {
-		.src = ctrl->rsrcs.clk_path_vote.mstr_id,
-		.dst = MSM_BUS_SLAVE_EBI_CH0,
-		.ab  = I2C_MSM_CLK_PATH_AVRG_BW(ctrl),
-		.ib  = I2C_MSM_CLK_PATH_BRST_BW(ctrl),
-	};
-
-	usecases[I2C_MSM_CLK_PATH_SUSPEND_VEC] = (struct msm_bus_paths) {
-		.num_paths = 1,
-		.vectors   = &paths[I2C_MSM_CLK_PATH_SUSPEND_VEC],
-	};
-
-	usecases[I2C_MSM_CLK_PATH_RESUME_VEC] = (struct msm_bus_paths) {
-		.num_paths = 1,
-		.vectors   = &paths[I2C_MSM_CLK_PATH_RESUME_VEC],
-	};
-
-	*ctrl->rsrcs.clk_path_vote.pdata = (struct msm_bus_scale_pdata) {
-		.usecase      = usecases,
-		.num_usecases = 2,
-		.name         = dev_name(ctrl->dev),
-	};
-
-	return 0;
-
-path_init_err:
-	kfree(paths);
-	kfree(usecases);
-	kfree(ctrl->rsrcs.clk_path_vote.pdata);
-	ctrl->rsrcs.clk_path_vote.pdata = NULL;
-	return -ENOMEM;
-}
 
 /*
  * i2c_msm_clk_path_postponed_register: reg with bus-scaling after it is probed
@@ -1656,38 +1586,25 @@ path_init_err:
  * @return zero on success
  *
  * Workaround: i2c driver may be probed before the bus scaling driver. Calling
- * msm_bus_scale_register_client() will fail if the bus scaling driver is not
- * ready yet. Thus, this function should be called not from probe but from a
- * later context. Also, this function may be called more then once before
- * register succeed. At this case only one error message will be logged. At boot
- * time all clocks are on, so earlier i2c transactions should succeed.
+ * icc_get() will fail if the bus scaling driver is not ready yet. Thus, this
+ * function should be called not from probe but from a
+ * later context.
  */
 static int i2c_msm_clk_path_postponed_register(struct i2c_msm_ctrl *ctrl)
 {
-	ctrl->rsrcs.clk_path_vote.client_hdl =
-		msm_bus_scale_register_client(ctrl->rsrcs.clk_path_vote.pdata);
+	int ret = 0;
 
-	if (ctrl->rsrcs.clk_path_vote.client_hdl) {
-		if (ctrl->rsrcs.clk_path_vote.reg_err) {
-			/* log a success message if an error msg was logged */
-			ctrl->rsrcs.clk_path_vote.reg_err = false;
-			dev_err(ctrl->dev,
-				"msm_bus_scale_register_client(mstr-id:%d):0x%x (ok)\n",
-				ctrl->rsrcs.clk_path_vote.mstr_id,
-				ctrl->rsrcs.clk_path_vote.client_hdl);
-		}
-	} else {
-		/* guard to log only one error on multiple failure */
-		if (!ctrl->rsrcs.clk_path_vote.reg_err) {
-			ctrl->rsrcs.clk_path_vote.reg_err = true;
+	ctrl->rsrcs.icc_path =
+		icc_get(&ctrl->adapter.dev, ctrl->rsrcs.mstr_id, DST_ID);
 
-			dev_info(ctrl->dev,
-				"msm_bus_scale_register_client(mstr-id:%d):0 (not a problem)\n",
-				ctrl->rsrcs.clk_path_vote.mstr_id);
-		}
+	if (IS_ERR_OR_NULL(ctrl->rsrcs.icc_path)) {
+		ret = ctrl->rsrcs.icc_path ?
+			PTR_ERR(ctrl->rsrcs.icc_path) : -EINVAL;
+		dev_err(ctrl->dev, "%s(): failed to get ICC path: %d\n", __func__, ret);
+		ctrl->rsrcs.icc_path = NULL;
 	}
 
-	return ctrl->rsrcs.clk_path_vote.client_hdl ? 0 : -EAGAIN;
+	return ctrl->rsrcs.icc_path ? ret : -ENOENT;
 }
 
 static void i2c_msm_clk_path_init(struct i2c_msm_ctrl *ctrl)
@@ -1696,16 +1613,9 @@ static void i2c_msm_clk_path_init(struct i2c_msm_ctrl *ctrl)
 	 * bail out if path voting is diabled (master_id == 0) or if it is
 	 * already registered (client_hdl != 0)
 	 */
-	if (!ctrl->rsrcs.clk_path_vote.mstr_id ||
-		ctrl->rsrcs.clk_path_vote.client_hdl)
+	if (!ctrl->rsrcs.mstr_id ||
+		ctrl->rsrcs.icc_path)
 		return;
-
-	/* if fail once then try no more */
-	if (!ctrl->rsrcs.clk_path_vote.pdata &&
-					i2c_msm_clk_path_init_structs(ctrl)) {
-		ctrl->rsrcs.clk_path_vote.mstr_id = 0;
-		return;
-	}
 
 	/* on failure try again later */
 	if (i2c_msm_clk_path_postponed_register(ctrl))
@@ -2500,7 +2410,7 @@ static int i2c_msm_rsrcs_process_dt(struct i2c_msm_ctrl *ctrl,
 							DT_REQ,  DT_U32,  0},
 	{"qcom,disable-dma",		&(ctrl->rsrcs.disable_dma),
 							DT_OPT,  DT_BOOL, 0},
-	{"qcom,master-id",		&(ctrl->rsrcs.clk_path_vote.mstr_id),
+	{"qcom,master-id",		&(ctrl->rsrcs.mstr_id),
 							DT_SGST, DT_U32,  0},
 	{"qcom,noise-rjct-scl",		&noise_rjct_scl,
 							DT_OPT,  DT_U32,  0},
@@ -2684,11 +2594,8 @@ static int i2c_msm_rsrcs_clk_init(struct i2c_msm_ctrl *ctrl)
 
 	ctrl->rsrcs.core_clk = clk_get(ctrl->dev, "core_clk");
 	if (IS_ERR(ctrl->rsrcs.core_clk)) {
-		ret = PTR_ERR(ctrl->rsrcs.core_clk);
-		if (ret != -EPROBE_DEFER) {
-			dev_err(ctrl->dev, "error on clk_get(core_clk):%d\n", ret);
-		}
-		return ret;
+		return dev_err_probe(ctrl->dev, PTR_ERR(ctrl->rsrcs.core_clk), 
+				"clk_get(core_clk)\n");
 	}
 
 	ret = clk_set_rate(ctrl->rsrcs.core_clk, ctrl->rsrcs.clk_freq_in);
@@ -2700,10 +2607,8 @@ static int i2c_msm_rsrcs_clk_init(struct i2c_msm_ctrl *ctrl)
 
 	ctrl->rsrcs.iface_clk = clk_get(ctrl->dev, "iface_clk");
 	if (IS_ERR(ctrl->rsrcs.iface_clk)) {
-		ret = PTR_ERR(ctrl->rsrcs.iface_clk);
-		if (ret != -EPROBE_DEFER) {
-			dev_err(ctrl->dev, "error on clk_get(iface_clk):%d\n", ret);
-		}
+		ret = dev_err_probe(ctrl->dev, PTR_ERR(ctrl->rsrcs.iface_clk), 
+				"clk_get(iface_clk)\n");
 		goto err_set_rate;
 	}
 
@@ -2954,7 +2859,7 @@ static int i2c_msm_probe(struct platform_device *pdev)
 	 */
 	ret = i2c_msm_qup_sw_reset(ctrl);
 	if (ret)
-		dev_err(ctrl->dev, "error error on qup software reset\n");
+		dev_err(ctrl->dev, "error on qup software reset\n");
 
 	i2c_msm_pm_clk_disable(ctrl);
 	i2c_msm_pm_clk_unprepare(ctrl);
@@ -2989,9 +2894,7 @@ err_no_pinctrl:
 clk_err:
 	i2c_msm_rsrcs_mem_teardown(ctrl);
 mem_err:
-	if (ret != -EPROBE_DEFER) {
-		dev_err(ctrl->dev, "error probe() failed with err:%d\n", ret);
-	}
+	dev_err_probe(ctrl->dev, ret, "error probe() failed with err\n");
 	return ret;
 }
 

@@ -221,6 +221,9 @@ enum i2c_msm_clk_path_vec_idx {
  */
 #define I2C_MSM_CLK_PATH_BRST_BW(ctrl) ((ctrl->rsrcs.clk_freq_in - 1) * 4)
 
+/* Path from Qup to DDR */
+#define DST_ID 512
+
 enum i2c_msm_gpio_name_idx {
 	I2C_MSM_GPIO_SCL,
 	I2C_MSM_GPIO_SDA,
@@ -434,13 +437,6 @@ struct i2c_msm_dbgfs {
  *       system goes idle (optimises for performance). When unset, voting using
  *       runtime pm (optimizes for power).
  */
-struct qup_i2c_clk_path_vote {
-	u32                         mstr_id;
-	u32                         client_hdl;
-	struct msm_bus_scale_pdata *pdata;
-	bool                        reg_err;
-	bool                        actv_only;
-};
 
 /*
  * i2c_msm_resources: OS resources
@@ -457,7 +453,8 @@ struct i2c_msm_resources {
 	struct clk                  *iface_clk;
 	int                          clk_freq_in;
 	int                          clk_freq_out;
-	struct qup_i2c_clk_path_vote clk_path_vote;
+	struct icc_path	*icc_path;
+	u32                         mstr_id;
 	int                          irq;
 	bool                         disable_dma;
 	struct pinctrl              *pinctrl;
