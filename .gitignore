@@ -137,9 +137,13 @@ all.config
 # fetched Android config fragments
 kernel/configs/android-*.cfg
 
-# AtomX work and output folders
-AtomX.sh
-Modules.sh
-Regen.sh
-out/
-work/
+# Personal
+/build/
+/out/
+/net/wireguard/
+builder.sh
+c.sh
+Buildlog-CLANG.txt
+Zip-out/
+build.sh
+qcacld-3.0.sh
